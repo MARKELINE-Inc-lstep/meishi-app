@@ -179,8 +179,29 @@ function saveCard(f) {
   row[COL['読み取った文字'] - 1] = (f.rawText || '').slice(0, 2000);
   sh.appendRow(row);
   const r = sh.getLastRow();
-  try { classifyRow_(sh, r); } catch (e) { console.warn('提案余地商材の判定は後でやり直します: ' + e); }
-  return { row: r, category: sh.getRange(r, COL['提案余地商材']).getValue() };
+  // 判定（HP読み込み＋Gemini）は待たずに返す。少し後に裏で動かす
+  try { scheduleClassify_(); } catch (e) { console.warn('判定の予約に失敗。1時間おきのやり直しで拾います: ' + e); }
+  return { row: r };
+}
+
+/** 30秒後に1回だけ classifySoon を動かす予約を置く（既に予約があれば置かない） */
+function scheduleClassify_() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) return;
+  try {
+    const exists = ScriptApp.getProjectTriggers().some(t => t.getHandlerFunction() === 'classifySoon');
+    if (!exists) ScriptApp.newTrigger('classifySoon').timeBased().after(30 * 1000).create();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** 登録直後の予約から呼ばれる：予約を消してから「未判定」の行を判定する */
+function classifySoon() {
+  ScriptApp.getProjectTriggers()
+    .filter(t => t.getHandlerFunction() === 'classifySoon')
+    .forEach(t => ScriptApp.deleteTrigger(t));
+  retryUnclassified();
 }
 
 /** 1時間おきのトリガー：「未判定」の行をやり直す */
