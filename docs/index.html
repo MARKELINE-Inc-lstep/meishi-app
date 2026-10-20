@@ -111,7 +111,7 @@ $('save').addEventListener('click', () => {
       // 登録できたら空に戻して、すぐ次の名刺を撮れるようにする（登録者だけ残す）
       const who = current.name || current.company;
       reset();
-      show($('readMsg'), '登録しました：' + who + '（提案余地商材は1分ほどでスプシに入ります）。次の名刺を撮れます。', 'ok');
+      show($('readMsg'), '登録しました：' + who + '（提案余地商材は数分でスプシに入ります）。次の名刺を撮れます。', 'ok');
     })
     .catch(err => { $('save').disabled = false; show($('saveMsg'), '登録できませんでした：' + err.message, 'err'); });
 });
