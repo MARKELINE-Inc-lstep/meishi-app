@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>名刺登録</title>
+<meta name="robots" content="noindex">
+<style>
+  body { font-family: -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif; margin: 0; padding: 16px; background: #f6f7f9; color: #222; }
+  h1 { font-size: 20px; margin: 0 0 12px; }
+  .card { background: #fff; border-radius: 12px; padding: 16px; margin-bottom: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  .hint { font-size: 13px; color: #666; margin: 6px 0 0; }
+  label { display: block; font-size: 13px; color: #555; margin: 10px 0 4px; }
+  input, textarea { width: 100%; box-sizing: border-box; font-size: 16px; padding: 10px; border: 1px solid #ccc; border-radius: 8px; }
+  button { width: 100%; font-size: 17px; padding: 14px; border: 0; border-radius: 10px; background: #06c755; color: #fff; font-weight: bold; margin-top: 12px; }
+  button.sub { background: #e5e7eb; color: #222; }
+  button:disabled { opacity: .5; }
+  #preview { max-width: 100%; border-radius: 8px; margin-top: 10px; display: none; }
+  .msg { padding: 10px; border-radius: 8px; margin-top: 10px; display: none; }
+  .ok { background: #e7f7ee; color: #116b35; }
+  .err { background: #fdecec; color: #a12121; }
+  #form { display: none; }
+</style>
+</head>
+<body>
+<h1>名刺登録</h1>
+
+<div class="card">
+  <input type="file" id="file" accept="image/*" capture="environment">
+  <p class="hint">無地の机の上で、明るいところで、名刺が画面いっぱいになるように撮ってください。</p>
+  <img id="preview">
+  <div id="readMsg" class="msg"></div>
+</div>
+
+<div class="card" id="form">
+  <label>登録者（あなたの名前・次回から自動で入ります）</label><input id="registrant">
+  <label>会社名</label><input id="company">
+  <label>部署・役職</label><input id="title">
+  <label>氏名</label><input id="name">
+  <label>メール</label><input id="email" type="email">
+  <label>電話</label><input id="tel" type="tel">
+  <label>携帯</label><input id="mobile" type="tel">
+  <label>住所</label><input id="address">
+  <label>URL</label><input id="url">
+  <label>メモ（どこで会ったか など）</label><textarea id="memo" rows="2"></textarea>
+  <button id="save">この内容で登録</button>
+  <button id="again" class="sub">撮り直す</button>
+  <div id="saveMsg" class="msg"></div>
+</div>
+
+<script>
+// 名刺登録アプリ（GAS）の公開URL。読み取り・登録・判定はすべて GAS 側で行う
+const API = 'https://script.google.com/macros/s/AKfycbzNDDdytImFEXa5ZcIUDwf7BwzDv8qXz19p8DdpiQOQBzX36LhyEJwBfzghQz8bPfPglA/exec';
+// text/plain で送ると事前確認（CORS）が起きない。Cookie は送らない（ログイン状態に左右されない）
+async function call(body) {
+  const res = await fetch(API, { method: 'POST', body: JSON.stringify(body), credentials: 'omit',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' } });
+  const j = await res.json();
+  if (!j.ok) throw new Error(j.error);
+  return j.data;
+}
+const F = ['company','title','name','email','tel','mobile','address','url','memo'];
+let current = {};
+const $ = id => document.getElementById(id);
+function show(el, text, cls) { el.textContent = text; el.className = 'msg ' + cls; el.style.display = 'block'; }
+
+// スマホの写真は大きいので、送る前に長辺1600pxに縮める
+function shrink(file) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const s = Math.min(1, 1600 / Math.max(img.width, img.height));
+      const c = document.createElement('canvas');
+      c.width = img.width * s; c.height = img.height * s;
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      resolve(c.toDataURL('image/jpeg', 0.9));
+    };
+    img.onerror = reject;
+    img.src = URL.createObjectURL(file);
+  });
+}
+
+$('file').addEventListener('change', async e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  $('form').style.display = 'none';
+  const dataUrl = await shrink(file);
+  $('preview').src = dataUrl; $('preview').style.display = 'block';
+  show($('readMsg'), '読み取り中です（10秒ほど）…', 'ok');
+  call({ action: 'read', base64: dataUrl.split(',')[1], mimeType: 'image/jpeg' })
+    .then(r => {
+      current = r;
+      F.forEach(k => { $(k).value = r[k] || ''; });
+      $('readMsg').style.display = 'none';
+      $('saveMsg').style.display = 'none';
+      $('form').style.display = 'block';
+      $('save').disabled = false;
+      try { if (!$('registrant').value) $('registrant').value = localStorage.getItem('meishiRegistrant') || ''; } catch (e) {}
+    })
+    .catch(err => show($('readMsg'), '読み取れませんでした：' + err.message, 'err'));
+});
+
+$('save').addEventListener('click', () => {
+  F.forEach(k => { current[k] = $(k).value.trim(); });
+  current.registrant = $('registrant').value.trim();
+  try { localStorage.setItem('meishiRegistrant', current.registrant); } catch (e) {}
+  $('save').disabled = true;
+  show($('saveMsg'), '登録中です…', 'ok');
+  call({ action: 'save', card: current })
+    .then(r => show($('saveMsg'), '登録しました（提案余地商材：' + (r.category || '提案余地商材は後で自動で入ります') + '）', 'ok'))
+    .catch(err => { $('save').disabled = false; show($('saveMsg'), '登録できませんでした：' + err.message, 'err'); });
+});
+
+$('again').addEventListener('click', () => {
+  $('file').value = ''; $('form').style.display = 'none'; $('preview').style.display = 'none';
+  $('file').click();
+});
+</script>
+</body>
+</html>
