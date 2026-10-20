@@ -135,7 +135,17 @@ function parseCard_(text) {
     .filter(p => { const n = p.replace(/\D/g, '').length; return n >= 10 && n <= 11; });
   const mobile = phones.find(p => /^0[789]0/.test(p.replace(/\D/g, ''))) || '';
   const tel = phones.find(p => p !== mobile) || '';
-  const company = (lines.find(l => /(株式会社|有限会社|合同会社|一般社団法人|社団法人|財団法人|医療法人|学校法人|\(株\)|（株）|Inc\.|Co\.,? ?Ltd)/.test(l)) || '');
+  let company = (lines.find(l => /(株式会社|有限会社|合同会社|一般社団法人|社団法人|財団法人|医療法人|学校法人|\(株\)|（株）|Inc\.|Co\.,? ?Ltd)/.test(l)) || '');
+  // 法人の種類が書いていない名刺：メール・URLのドメイン名と同じ文字の行（ロゴ）を会社名にする
+  if (!company) {
+    const dm = (email.split('@')[1] || url.replace(/^https?:\/\/(www\.)?/, '')).toLowerCase();
+    const label = /^(gmail|yahoo|icloud|outlook|hotmail)\./.test(dm) ? '' : dm.split(/[./]/)[0];
+    const norm = s => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (label.length >= 3) {
+      company = lines.filter(l => l.length <= 30 && !/@|https?:|www\./i.test(l) && norm(l).includes(norm(label)))
+        .sort((a, b) => a.length - b.length)[0] || '';
+    }
+  }
   // 住所：都道府県から始まる部分。次の行がビル名なら足す
   const PREF = /(北海道|東京都|京都府|大阪府|.{2,3}県)/;
   const addrIdx = lines.findIndex(l => PREF.test(l) && /[市区町村郡]/.test(l));
@@ -145,15 +155,26 @@ function parseCard_(text) {
     const next = lines[addrIdx + 1] || '';
     if (/(ビル|階|F$|号室|館)/.test(next) && !/TEL|FAX|@/i.test(next)) address += ' ' + next;
   }
-  // 氏名：「姓 名」の行、または「漢字の氏名＋ローマ字」の行の漢字部分
-  let name = lines.find(l => /^[一-龥々ヶ]{1,4}[ 　][一-龥々ヶ]{1,4}$/.test(l)) || '';
-  if (!name) {
-    const m = lines.map(l => l.match(/^([一-龥々ヶ]{1,4}[ 　]?[一-龥々ヶ]{1,4})\s+[A-Z][a-z]+/)).find(Boolean);
-    name = m ? m[1] : '';
-  }
-  // 役職：役職名を含む行を優先し、無ければ部署の行
-  const notNC = l => l !== company && l !== name && l.length <= 50;
-  const title = (lines.find(l => /(代表|取締役|社長|長$|長 |マネージャー|リーダー|Manager|CEO|COO|CTO|Sales|担当)/.test(l) && notNC(l)) ||
+  // 氏名：漢字だけの短い行（姓と名の間の空白は無くてもよい）を候補にして点数で選ぶ
+  //   空白あり／隣の行がローマ字の氏名／メールにそのローマ字が入っている、で点を足す
+  const NOT_NAME = /(会社|法人|代表|取締|役員|部$|課$|室$|長$|講師|事業|支店|本社|営業|担当|顧問|主任|係$|東京|大阪|京都|名古屋|福岡)/;
+  const isRomaji = l => /^[A-Za-z]+[ ,]+[A-Za-z]+$/.test(l);
+  const local = email.split('@')[0].toLowerCase();
+  let name = '', best = 0;
+  lines.forEach((raw, i) => {
+    const l = raw.split(/\s*[\/／|｜]\s*/)[0].replace(/^(氏名|名前)[:：]?\s*/, '');
+    const kanji = l.replace(/[ 　]/g, '');
+    if (!/^[一-龥々ヶ]{2,6}$/.test(kanji) || !/^[一-龥々ヶ]+[ 　]?[一-龥々ヶ]+$/.test(l) || NOT_NAME.test(l)) return;
+    let score = 1;
+    if (/[ 　]/.test(l)) score += 2;
+    const near = [lines[i - 1], lines[i + 1]].filter(s => s && isRomaji(s));
+    if (near.length) score += 2;
+    if (near.some(s => s.toLowerCase().split(/[ ,]+/).some(w => w.length >= 2 && local.includes(w)))) score += 2;
+    if (score > best) { best = score; name = l; }
+  });
+  // 役職：役職名を含む行を優先し、無ければ部署の行（住所・電話の行は除く）
+  const notNC = l => l !== company && l !== name && l.length <= 30 && !/〒|TEL|FAX|@/i.test(l) && !PREF.test(l);
+  const title = (lines.find(l => /(代表|取締役|社長|長$|長 |マネージャー|リーダー|プランナー|コンサルタント|ディレクター|エンジニア|デザイナー|セールス|講師|Manager|Director|CEO|COO|CTO|Sales|担当)/.test(l) && notNC(l)) ||
                  lines.find(l => /(部|課|室|グループ|事業部|オフィス)/.test(l) && notNC(l)) || '');
   return { company, title, name, email, tel, mobile, address, url };
 }
