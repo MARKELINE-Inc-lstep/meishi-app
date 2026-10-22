@@ -30,6 +30,9 @@
   .item .head img { width: 45%; border-radius: 6px; }
   .item .head .st { flex: 1; font-size: 14px; }
   .item .head .st b { display: block; font-size: 15px; }
+  .quick { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .quick span { font-size: 14px; padding: 5px 10px; border-radius: 14px; border: 1px solid #06c755; color: #06c755; cursor: pointer; }
+  .quick span.on { background: #06c755; color: #fff; }
 </style>
 </head>
 <body>
@@ -40,7 +43,7 @@
     <label class="pick">撮る<input type="file" id="shoot" accept="image/*" capture="environment"></label>
     <label class="pick sub">写真から選ぶ<input type="file" id="choose" accept="image/*" multiple></label>
   </div>
-  <p class="hint">明るいところで、机の上に名刺を並べて撮ってください（何枚でも）。名刺どうしは少し離し、机は名刺と色の違うところがおすすめです。写真に写った名刺を自動で1枚ずつに分けて読み取ります。「写真から選ぶ」ではスクリーンショットや写真を何枚でも選べます。</p>
+  <p class="hint"><b>名刺どうしを少し離して並べ、1回10枚までで撮ってください。</b>写真に写った名刺を自動で1枚ずつ読み取ります。</p>
   <div id="startMsg" class="msg"></div>
 </div>
 
@@ -49,7 +52,7 @@
   <p class="hint">読み取った内容を確かめて、違うところは直してください。</p>
   <div id="items"></div>
   <label>登録者（あなたの名前・次回から自動で入ります）</label><input id="registrant">
-  <label>タグ（例：EO。今回の名刺すべてに付きます。前に使ったタグは候補に出ます）</label><input id="tags" list="tagList" autocomplete="off"><datalist id="tagList"></datalist>
+  <datalist id="tagList"></datalist>
   <label>メモ（どこで会ったか など。今回の名刺すべてに入ります）</label><textarea id="memo" rows="2"></textarea>
   <button id="save">まとめて登録</button>
   <div id="saveMsg" class="msg"></div>
@@ -103,72 +106,128 @@ function loadImage(file) {
 
 /**
  * 写真の中の名刺を探す（AI は使わない。画面の中だけで計算する）
- * 写真の縁の色を「机の色」とみなし、それと違う色のかたまりのうち、名刺らしい大きさ・形のものを1枚とする。
+ * 2つの見方で探し、どちらかで見つかったものを合わせて使う（同じ名刺は1つにまとめる）。
+ *   色：写真の縁の色を「机の色」とみなし、それと色の違うかたまり（色の違う机の上の名刺に強い）
+ *   線：名刺のふち・影の線で囲まれたところ（白い机の白い名刺、黒い机の暗い名刺に強い）
  * 2枚以上見つからなければ、写真全体（または見つかった1枚）を1枚の名刺として読む。
  */
 function detectCards(im) {
-  const S = 400 / Math.max(im.width, im.height);
-  const W = Math.max(1, Math.round(im.width * S)), H = Math.max(1, Math.round(im.height * S));
+  const S = 600 / Math.max(im.width, im.height);
+  const W = Math.max(1, Math.round(im.width * S)), H = Math.max(1, Math.round(im.height * S)), N = W * H;
   const c = document.createElement('canvas'); c.width = W; c.height = H;
   const g = c.getContext('2d', { willReadFrequently: true });
   g.drawImage(im, 0, 0, W, H);
   const px = g.getImageData(0, 0, W, H).data;
-  // 机の色：写真の縁（3%）の色の中央値
+  const a = [byColor(px, W, H), byLines(px, W, H)].map(mask => cardBoxes(mask, W, H));
+  const found = a[0].length >= a[1].length ? a[0].slice() : a[1].slice();
+  const overlap = (p, q) => {
+    const ix = Math.max(0, Math.min(p.x + p.w, q.x + q.w) - Math.max(p.x, q.x));
+    const iy = Math.max(0, Math.min(p.y + p.h, q.y + q.h) - Math.max(p.y, q.y));
+    return ix * iy / Math.min(p.w * p.h, q.w * q.h);
+  };
+  a[0].concat(a[1]).forEach(b => { if (!found.some(f => overlap(f, b) > 0.3)) found.push(b); });
+  const sum = found.reduce((t, b) => t + b.a, 0);
+  if (found.length >= 2 && sum >= N * 0.1) {
+    // 上の段から、左から順に並べる
+    found.sort((p, q) => (Math.abs(p.y - q.y) < Math.min(p.h, q.h) / 2 ? p.x - q.x : p.y - q.y));
+    return found.map(pad);
+  }
+  if (found.length === 1 && found[0].a >= N * 0.2) return [pad(found[0])];
+  return [{ x: 0, y: 0, w: 1, h: 1 }];
+}
+// 色：机の色（縁3%の中央値）から離れた色のところを1にする
+function byColor(px, W, H) {
   const m = Math.max(2, Math.round(Math.min(W, H) * 0.03));
   const edge = [[], [], []];
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
     if (x >= m && y >= m && x < W - m && y < H - m) continue;
     const i = (y * W + x) * 4; edge[0].push(px[i]); edge[1].push(px[i + 1]); edge[2].push(px[i + 2]);
   }
-  const med = a => a.sort((p, q) => p - q)[a.length >> 1];
-  const bg = edge.map(med);
-  const dist = i => Math.abs(px[i] - bg[0]) + Math.abs(px[i + 1] - bg[1]) + Math.abs(px[i + 2] - bg[2]);
-  const ed = [];
-  for (let k = 0; k < edge[0].length; k++) ed.push(Math.abs(edge[0][k] - bg[0]) + Math.abs(edge[1][k] - bg[1]) + Math.abs(edge[2][k] - bg[2]));
-  ed.sort((p, q) => p - q);
-  const T = Math.max(60, ed[Math.floor(ed.length * 0.9)] * 1.5);   // 机の模様・影より大きい差だけを名刺とみなす
-  let fg = new Uint8Array(W * H);
-  for (let k = 0; k < W * H; k++) fg[k] = dist(k * 4) > T ? 1 : 0;
-  // 少し削って、近くに置いた名刺どうしを切り離す
-  const R = 2, er = new Uint8Array(W * H);
+  const bg = edge.map(v => v.slice().sort((p, q) => p - q)[v.length >> 1]);
+  const ed = edge[0].map((_, k) => Math.abs(edge[0][k] - bg[0]) + Math.abs(edge[1][k] - bg[1]) + Math.abs(edge[2][k] - bg[2])).sort((p, q) => p - q);
+  const T = Math.max(60, ed[Math.floor(ed.length * 0.9)] * 1.5);   // 机の模様・影より大きい差だけ
+  const fg = new Uint8Array(W * H);
+  for (let k = 0; k < W * H; k++) {
+    const i = k * 4;
+    fg[k] = Math.abs(px[i] - bg[0]) + Math.abs(px[i + 1] - bg[1]) + Math.abs(px[i + 2] - bg[2]) > T ? 1 : 0;
+  }
+  return fg;
+}
+// 線：明るさの変わり目（ふち・影）を線として拾い、写真の外側から塗っていって、線に囲まれて塗れなかったところを1にする
+function byLines(px, W, H) {
+  const N = W * H, gray = new Float32Array(N), bl = new Float32Array(N), gr = new Float32Array(N);
+  for (let k = 0; k < N; k++) gray[k] = px[k * 4] * 0.3 + px[k * 4 + 1] * 0.59 + px[k * 4 + 2] * 0.11;
+  for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {   // ざらつきを均す
+    let t = 0;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) t += gray[(y + dy) * W + x + dx];
+    bl[y * W + x] = t / 9;
+  }
+  for (let y = 2; y < H - 2; y++) for (let x = 2; x < W - 2; x++) {
+    const k = y * W + x;
+    gr[k] = Math.abs(bl[k + 1] - bl[k - 1]) + Math.abs(bl[k + W] - bl[k - W]);
+  }
+  const sorted = Array.from(gr).filter(v => v > 0).sort((p, q) => p - q);
+  const T = Math.max(6, (sorted[sorted.length >> 1] || 0) * 3);   // 写真全体のざらつきの3倍より強い変わり目だけ
+  let line = new Uint8Array(N);
+  for (let k = 0; k < N; k++) line[k] = gr[k] > T ? 1 : 0;
+  line = grow(line, W, H, 1);   // 途切れた線をつなぐ
+  // 写真の外側から、線を越えずに塗る
+  const out = new Uint8Array(N), st = new Int32Array(N);
+  let top = 0;
+  const push = k => { if (!out[k] && !line[k]) { out[k] = 1; st[top++] = k; } };
+  for (let x = 0; x < W; x++) { push(x); push((H - 1) * W + x); }
+  for (let y = 0; y < H; y++) { push(y * W); push(y * W + W - 1); }
+  while (top) {
+    const q = st[--top], x = q % W;
+    if (x > 0) push(q - 1); if (x < W - 1) push(q + 1); if (q >= W) push(q - W); if (q < N - W) push(q + W);
+  }
+  const fg = new Uint8Array(N);
+  for (let k = 0; k < N; k++) fg[k] = out[k] ? 0 : 1;
+  return fg;
+}
+// 1のところを r だけ太らせる
+function grow(m, W, H, r) {
+  const o = new Uint8Array(W * H);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    if (!m[y * W + x]) continue;
+    for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+      const yy = y + dy, xx = x + dx;
+      if (yy >= 0 && yy < H && xx >= 0 && xx < W) o[yy * W + xx] = 1;
+    }
+  }
+  return o;
+}
+// かたまりのうち名刺らしいものの外枠を返す
+function cardBoxes(fg, W, H) {
+  // 少し削って、近くに置いた名刺どうし・机の細かい線を切り離す
+  const R = 3, er = new Uint8Array(W * H);
   for (let y = R; y < H - R; y++) for (let x = R; x < W - R; x++) {
     let ok = 1;
     for (let dy = -R; dy <= R && ok; dy++) for (let dx = -R; dx <= R; dx++) if (!fg[(y + dy) * W + x + dx]) { ok = 0; break; }
     er[y * W + x] = ok;
   }
-  // つながったかたまりごとに、外枠と面積を数える
-  const seen = new Uint8Array(W * H), found = [];
-  const stack = new Int32Array(W * H);
+  const seen = new Uint8Array(W * H), st = new Int32Array(W * H), found = [];
   for (let k = 0; k < W * H; k++) {
     if (!er[k] || seen[k]) continue;
     let top = 0, n = 0, x0 = W, y0 = H, x1 = 0, y1 = 0;
-    stack[top++] = k; seen[k] = 1;
+    st[top++] = k; seen[k] = 1;
     while (top) {
-      const q = stack[--top], x = q % W, y = (q - x) / W; n++;
+      const q = st[--top], x = q % W, y = (q - x) / W; n++;
       if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
-      for (const nb of [q - 1, q + 1, q - W, q + W]) {
-        if (nb < 0 || nb >= W * H || seen[nb] || !er[nb]) continue;
-        if ((nb === q - 1 && x === 0) || (nb === q + 1 && x === W - 1)) continue;
-        seen[nb] = 1; stack[top++] = nb;
-      }
+      if (x > 0 && er[q - 1] && !seen[q - 1]) { seen[q - 1] = 1; st[top++] = q - 1; }
+      if (x < W - 1 && er[q + 1] && !seen[q + 1]) { seen[q + 1] = 1; st[top++] = q + 1; }
+      if (y > 0 && er[q - W] && !seen[q - W]) { seen[q - W] = 1; st[top++] = q - W; }
+      if (y < H - 1 && er[q + W] && !seen[q + W]) { seen[q + W] = 1; st[top++] = q + W; }
     }
     const bw = x1 - x0 + 1 + 2 * R, bh = y1 - y0 + 1 + 2 * R, area = bw * bh;
     const ratio = Math.max(bw, bh) / Math.min(bw, bh);
-    // 名刺らしさ：写真の2.5%以上の大きさ・中身が詰まっている（文字の集まりではない）・極端に細長くない（斜めに置いても通る）
-    if (area >= W * H * 0.025 && n / area >= 0.4 && ratio <= 2.3)
+    // 名刺らしさ：写真の1.5%以上・写真の9割未満の大きさ・中身が詰まっている（文字の集まりではない）・極端に細長くない
+    if (area >= W * H * 0.015 && area < W * H * 0.9 && n / area >= 0.4 && ratio <= 2.3)
       found.push({ x: (x0 - R) / W, y: (y0 - R) / H, w: bw / W, h: bh / H, a: area });
   }
   // 1枚の写真の名刺はだいたい同じ大きさ。一番大きいものの35%未満（ロゴ・小物）は外す
   const big = Math.max(0, ...found.map(b => b.a));
-  found.splice(0, found.length, ...found.filter(b => b.a >= big * 0.35));
-  const sum = found.reduce((t, b) => t + b.a, 0);
-  if (found.length >= 2 && sum >= W * H * 0.12) {
-    // 上の段から、左から順に並べる
-    found.sort((p, q) => (Math.abs(p.y - q.y) < Math.min(p.h, q.h) / 2 ? p.x - q.x : p.y - q.y));
-    return found.map(pad);
-  }
-  if (found.length === 1 && found[0].a >= W * H * 0.2) return [pad(found[0])];
-  return [{ x: 0, y: 0, w: 1, h: 1 }];
+  return found.filter(b => b.a >= big * 0.35);
 }
 // 名刺の縁が欠けないように、少し外側まで含める
 function pad(b) {
@@ -222,7 +281,12 @@ function status(it, text) { const s = document.querySelector('#' + it.id + ' .st
 function fillFields(it) {
   const box = document.querySelector('#' + it.id + ' .fields');
   box.innerHTML = F.map(([k, label, type]) =>
-    '<label>' + label + '</label><input data-k="' + k + '"' + (type ? ' type="' + type + '"' : '') + ' value="' + esc(it.data[k] || '') + '">').join('');
+    '<label>' + label + '</label><input data-k="' + k + '"' + (type ? ' type="' + type + '"' : '') + ' value="' + esc(it.data[k] || '') + '">').join('') +
+    '<label>タグ（例：EO。2つ以上は「、」で区切る）</label><input class="tag" list="tagList" autocomplete="off"><div class="quick"></div>';
+  const tag = box.querySelector('.tag');
+  tag.addEventListener('input', () => drawQuick(it));
+  tag.addEventListener('change', () => { learn(tagsOf(it)); });
+  drawQuick(it);
   const head = document.querySelector('#' + it.id + ' .st b');
   head.textContent = it.data.name || it.data.company || head.textContent;
 }
@@ -242,11 +306,28 @@ function refresh() {
   try { if (!$('registrant').value) $('registrant').value = localStorage.getItem('meishiRegistrant') || ''; } catch (e) {}
 }
 
-/* ---------- タグ：書き込む欄1つ。前に使ったタグは候補に出る ---------- */
+/* ---------- タグ：名刺ごとに書く。前に使ったタグはボタンで選べる ---------- */
 let known = [];
-function setTagList() { $('tagList').innerHTML = known.map(t => '<option value="' + esc(t) + '">').join(''); }
-const tagValues = () => $('tags').value.split(/[、,，]/).map(t => t.trim()).filter(Boolean);
-call({ action: 'tags' }).then(t => { known = t || []; setTagList(); }).catch(() => {});
+const splitTags = v => v.split(/[、,，]/).map(t => t.trim()).filter(Boolean);
+const tagsOf = it => { const el = document.querySelector('#' + it.id + ' .tag'); return el ? splitTags(el.value) : []; };
+function drawQuick(it) {
+  const box = document.querySelector('#' + it.id + ' .quick');
+  if (!box) return;
+  const on = tagsOf(it);
+  box.innerHTML = known.slice(0, 8).map(t => '<span class="' + (on.includes(t) ? 'on' : '') + '">' + esc(t) + '</span>').join('');
+  [...box.children].forEach((el, i) => el.addEventListener('click', () => {
+    const t = known[i], cur = tagsOf(it);
+    document.querySelector('#' + it.id + ' .tag').value = (cur.includes(t) ? cur.filter(x => x !== t) : cur.concat(t)).join('、');
+    drawQuick(it);
+  }));
+}
+// 新しく書いたタグを、ほかの名刺のボタンにも出す
+function learn(list) {
+  list.forEach(t => { if (!known.includes(t)) known.unshift(t); });
+  $('tagList').innerHTML = known.map(t => '<option value="' + esc(t) + '">').join('');
+  items.forEach(drawQuick);
+}
+call({ action: 'tags' }).then(t => { known = t || []; learn([]); }).catch(() => {});
 
 /* ---------- まとめて登録（1件ずつ順に送る。失敗したものは画面に残す） ---------- */
 $('save').addEventListener('click', async () => {
@@ -256,7 +337,7 @@ $('save').addEventListener('click', async () => {
   $('save').disabled = true;
   let ok = 0, ng = 0;
   for (const it of todo) {
-    const card = Object.assign({}, it.data, { registrant, memo: $('memo').value.trim(), tags: tagValues() });
+    const card = Object.assign({}, it.data, { registrant, memo: $('memo').value.trim(), tags: tagsOf(it) });
     document.querySelectorAll('#' + it.id + ' [data-k]').forEach(el => { card[el.dataset.k] = el.value.trim(); });
     show($('saveMsg'), '登録中です（' + (ok + ng + 1) + '／' + todo.length + '）…', 'ok');
     try {
@@ -274,8 +355,6 @@ $('save').addEventListener('click', async () => {
     show($('saveMsg'), ok + '件を登録しました。' + ng + '件は登録できませんでした（画面に残しています）。', 'err');
   } else {
     $('memo').value = '';
-    tagValues().forEach(t => { if (!known.includes(t)) known.unshift(t); });
-    setTagList(); $('tags').value = '';
     $('saveMsg').style.display = 'none';
     show($('startMsg'), ok + '件を登録しました（提案余地商材は数分でスプシに入ります）。次の名刺を撮れます。', 'ok');
   }
