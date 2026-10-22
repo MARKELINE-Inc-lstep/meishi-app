@@ -11,8 +11,9 @@
  */
 
 const SHEET_NAME = '名刺';
-const HEADERS = ['登録日時', '登録者', '会社名', '部署・役職', '氏名', 'メール', '電話', '携帯', '住所', 'URL',
+const HEADERS = ['登録日時', '登録者', '名刺（写真）', '会社名', '部署・役職', '氏名', 'メール', '電話', '携帯', '住所', 'URL', 'タグ',
   '提案余地商材', '提案の理由', '想定される課題', '判定状態', 'メモ', '名刺画像', '読み取った文字'];
+const PHOTO_ROW_HEIGHT = 110;
 const NONE = '対象外・不明';
 // 商材の強み・弱みは「商材」シートで現場が直す（AI はそれを読んで選ぶ）。下は最初に入れる中身
 const PRODUCT_SHEET = '商材';
@@ -29,7 +30,8 @@ const PRODUCT_SEED = [
   ['LINEグループまとめるくん', 'LINEグループに散らばった連絡・情報をまとめ、Chatwork・Slack・メールに届ける。手軽に始められる',
     'LINEグループを使っていない会社（LINE WORKS など）は対象外', '社内や取引先との連絡をLINEグループで回している会社。まずは小さく試したい相手']
 ];
-const COL = Object.fromEntries(HEADERS.map((h, i) => [h, i + 1]));
+// 列の位置は表の1行目から読む（列を足したり人が並べ替えたりしてもずれない）
+let COL = Object.fromEntries(HEADERS.map((h, i) => [h, i + 1]));
 
 function doGet() {
   return HtmlService.createHtmlOutputFromFile('index')
@@ -48,6 +50,7 @@ function doPost(e) {
     const req = JSON.parse(e.postData.contents);
     if (req.action === 'read') out = { ok: true, data: readCard(req.base64, req.mimeType) };
     else if (req.action === 'save') out = { ok: true, data: saveCard(req.card || {}) };
+    else if (req.action === 'tags') out = { ok: true, data: listTags() };
     else throw new Error('不明な操作です');
   } catch (err) {
     out = { ok: false, error: String(err.message || err) };
@@ -69,7 +72,58 @@ function sheet_() {
     sh.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]).setFontWeight('bold');
     sh.setFrozenRows(1);
   }
+  ensureColumns_(sh);
   return sh;
+}
+
+/** 後から増えた列（名刺（写真）・タグ など）が無ければ、決まった位置に差し込む。入っている行は動かさない */
+function ensureColumns_(sh) {
+  let head = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].map(String);
+  HEADERS.forEach((h, i) => {
+    if (head.includes(h)) return;
+    // 1つ前の見出しの右に差し込む（前の見出しが無ければ左端）
+    const prev = HEADERS.slice(0, i).reverse().find(x => head.includes(x));
+    const at = prev ? head.indexOf(prev) + 1 : 0;
+    if (at === 0) sh.insertColumnBefore(1); else sh.insertColumnAfter(at);
+    sh.getRange(1, at + 1).setValue(h).setFontWeight('bold');
+    if (h === '名刺（写真）') sh.setColumnWidth(at + 1, 180);
+    head = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].map(String);
+  });
+  COL = Object.fromEntries(head.map((h, i) => [h, i + 1]).filter(([h]) => h));
+}
+
+/** 名刺の画像をセルの中に見せる式（Drive の縮小画像。画像フォルダはリンクを知っている人が見られる設定） */
+function photoFormula_(imageId) {
+  return imageId ? '=IMAGE("https://drive.google.com/thumbnail?id=' + imageId + '&sz=w600")' : '';
+}
+
+/** 一度だけ手で実行：前から入っている行にも「名刺（写真）」を入れる */
+function backfillPhotos() {
+  const sh = sheet_();
+  const last = sh.getLastRow();
+  if (last < 2) return;
+  const urls = sh.getRange(2, COL['名刺画像'], last - 1, 1).getValues();
+  const photos = sh.getRange(2, COL['名刺（写真）'], last - 1, 1).getFormulas();
+  let n = 0;
+  urls.forEach(([u], i) => {
+    const m = String(u).match(/\/d\/([\w-]{20,})/) || String(u).match(/id=([\w-]{20,})/);
+    if (!m || photos[i][0]) return;
+    sh.getRange(i + 2, COL['名刺（写真）']).setFormula(photoFormula_(m[1]));
+    sh.setRowHeight(i + 2, PHOTO_ROW_HEIGHT);
+    n++;
+  });
+  console.log(n + '行に写真を入れました');
+}
+
+/** 登録済みのタグ（多い順）。画面の「よく使うタグ」に出す */
+function listTags() {
+  const sh = sheet_();
+  const last = sh.getLastRow();
+  if (last < 2) return [];
+  const count = {};
+  sh.getRange(2, COL['タグ'], last - 1, 1).getValues().forEach(([v]) =>
+    String(v).split(/[、,，]/).map(t => t.trim()).filter(Boolean).forEach(t => { count[t] = (count[t] || 0) + 1; }));
+  return Object.keys(count).sort((a, b) => count[b] - count[a]).slice(0, 30);
 }
 
 /** 「商材」シート（無ければ作って最初の中身を入れる） */
@@ -117,6 +171,7 @@ function readCard(base64, mimeType) {
   }
   const fields = parseCard_(text);
   fields.imageUrl = image.getUrl();
+  fields.imageId = image.getId();
   fields.rawText = text;
   return fields;
 }
@@ -136,6 +191,8 @@ function parseCard_(text) {
   const mobile = phones.find(p => /^0[789]0/.test(p.replace(/\D/g, ''))) || '';
   const tel = phones.find(p => p !== mobile) || '';
   let company = (lines.find(l => /(株式会社|有限会社|合同会社|一般社団法人|社団法人|財団法人|医療法人|学校法人|\(株\)|（株）|Inc\.|Co\.,? ?Ltd)/.test(l)) || '');
+  // 会社名の行に「京都本社/京都市…」のように拠点・住所が続いているときは、その手前で切る
+  company = company.replace(/[\s　]*[\/／|｜].*$/, '').replace(/[\s　]+\S*(本社|支社|支店|営業所|事務所|オフィス)$/, '').trim();
   // 法人の種類が書いていない名刺：メール・URLのドメイン名と同じ文字の行（ロゴ）を会社名にする
   if (!company) {
     const dm = (email.split('@')[1] || url.replace(/^https?:\/\/(www\.)?/, '')).toLowerCase();
@@ -146,14 +203,23 @@ function parseCard_(text) {
         .sort((a, b) => a.length - b.length)[0] || '';
     }
   }
-  // 住所：都道府県から始まる部分。次の行がビル名なら足す
+  // 住所：都道府県（無ければ「〇〇市」など）から始まる部分。最初に出てくる住所（本社）を使う
+  //   後ろに続く電話・FAX・メール・郵便番号は切り、次の行が番地・ビル名なら足す
   const PREF = /(北海道|東京都|京都府|大阪府|.{2,3}県)/;
-  const addrIdx = lines.findIndex(l => PREF.test(l) && /[市区町村郡]/.test(l));
+  const CITY = /(北海道|東京都|京都府|大阪府|[一-龥]{2,3}県|[一-龥]{1,4}市|東京都?[一-龥]{1,3}区)(?=[一-龥ぁ-んァ-ヶ0-9０-９])/;
+  const addrIdx = lines.findIndex(l => CITY.test(l) && /[市区町村郡]/.test(l) && /[0-9０-９丁番号目条]/.test(l + (lines[lines.indexOf(l) + 1] || '')));
+  const cutTail = s => s
+    .replace(/[\s　]*(TEL|Tel|tel|T\.|FAX|Fax|fax|F\.|E-?mail|Mail|mail|Mobile|mobile|Phone|phone|電話|携帯|代表|直通)[\s:：.]*\(?0\d.*$/, '')
+    .replace(/[\s　]*(TEL|FAX|E-?MAIL|MAIL|MOBILE|PHONE)\b.*$/i, '')
+    .replace(/[\s　]*(?<![\d-])0\d{1,4}[-‐－()（）]\d{1,4}[-‐－()（）]\d{3,4}.*$/, '')
+    .replace(/[\s　]*[〒T][\s　]?\d{3}[-‐－]?\d{4}/g, '')
+    .replace(/[\s　]+$/, '');
   let address = '';
   if (addrIdx >= 0) {
-    address = lines[addrIdx].slice(lines[addrIdx].search(PREF)).replace(/\s*(TEL|Tel|FAX|Mail).*$/, '');
-    const next = lines[addrIdx + 1] || '';
-    if (/(ビル|階|F$|号室|館)/.test(next) && !/TEL|FAX|@/i.test(next)) address += ' ' + next;
+    address = cutTail(lines[addrIdx].slice(lines[addrIdx].search(CITY)));
+    const next = cutTail((lines[addrIdx + 1] || '').replace(/^[〒T][\s　]?\d{3}[-‐－]?\d{4}[\s　]*/, ''));
+    if (next && next.length <= 40 && !/@|https?:|www\./i.test(next) && !CITY.test(next) &&
+        (/(ビル|階|F$|F[\s　]|号室|館|タワー|センター|プラザ|ハイツ|マンション)/.test(next) || /^[0-9０-９]/.test(next))) address += ' ' + next;
   }
   // 氏名：漢字だけの短い行（姓と名の間の空白は無くてもよい）を候補にして点数で選ぶ
   //   空白あり／隣の行がローマ字の氏名／メールにそのローマ字が入っている、で点を足す
@@ -183,7 +249,7 @@ function parseCard_(text) {
 function saveCard(f) {
   if (!f.company && !f.name) throw new Error('会社名か氏名のどちらかは入れてください');
   const sh = sheet_();
-  const row = new Array(HEADERS.length).fill('');
+  const row = new Array(Math.max(...Object.values(COL))).fill('');
   row[COL['登録日時'] - 1] = new Date();
   row[COL['登録者'] - 1] = f.registrant || Session.getActiveUser().getEmail() || '';
   row[COL['会社名'] - 1] = f.company || '';
@@ -194,12 +260,19 @@ function saveCard(f) {
   row[COL['携帯'] - 1] = f.mobile || '';
   row[COL['住所'] - 1] = f.address || '';
   row[COL['URL'] - 1] = f.url || '';
+  row[COL['タグ'] - 1] = (Array.isArray(f.tags) ? f.tags : String(f.tags || '').split(/[、,，]/))
+    .map(t => String(t).trim()).filter(Boolean).join('、');
   row[COL['判定状態'] - 1] = '未判定';
   row[COL['メモ'] - 1] = f.memo || '';
   row[COL['名刺画像'] - 1] = f.imageUrl || '';
   row[COL['読み取った文字'] - 1] = (f.rawText || '').slice(0, 2000);
   sh.appendRow(row);
   const r = sh.getLastRow();
+  const id = f.imageId || (String(f.imageUrl || '').match(/\/d\/([\w-]{20,})/) || [])[1];
+  if (id) {
+    sh.getRange(r, COL['名刺（写真）']).setFormula(photoFormula_(id));
+    sh.setRowHeight(r, PHOTO_ROW_HEIGHT);
+  }
   // 判定（HP読み込み＋Gemini）は待たずに返す。少し後に裏で動かす
   try { scheduleClassify_(); } catch (e) { console.warn('判定の予約に失敗。1時間おきのやり直しで拾います: ' + e); }
   return { row: r };
@@ -250,8 +323,8 @@ function setupTrigger() {
 function classifyRow_(sh, r) {
   const company = sh.getRange(r, COL['会社名']).getValue();
   const url = sh.getRange(r, COL['URL']).getValue();
-  const out3 = (p, reason, issue) =>
-    sh.getRange(r, COL['提案余地商材'], 1, 4).setValues([[p, reason, issue, '判定済み']]);
+  const out3 = (p, reason, issue) => [['提案余地商材', p], ['提案の理由', reason], ['想定される課題', issue], ['判定状態', '判定済み']]
+    .forEach(([h, v]) => sh.getRange(r, COL[h]).setValue(v));
   if (!company && !url) { out3(NONE, '会社名が無い', ''); return; }
   const products = products_();
   const names = products.map(p => p[0]);
